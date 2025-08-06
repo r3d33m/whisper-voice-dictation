@@ -1,0 +1,8 @@
+{
+  "name": "Voice Dictation",
+  "description": "Dictado por voz con Whisper - Incluye modo normal y tiempo real",
+  "uuid": "voice-dictation@miguel", 
+  "shell-version": ["47", "48"],
+  "version": 2,
+  "url": "https://github.com/miguel/voice-dictation-extension"
+}

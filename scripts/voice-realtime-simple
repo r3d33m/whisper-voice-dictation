@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+Transcripción en tiempo real simplificada
+"""
+
+import subprocess
+import os
+import sys
+import time
+import signal
+from pathlib import Path
+import threading
+
+CACHE_DIR = Path.home() / '.cache' / 'voice-realtime'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+MODEL = "/home/miguel/src/whisper.cpp/models/ggml-tiny.bin"
+WHISPER = "/home/miguel/src/whisper.cpp/build/bin/whisper-cli"
+
+running = True
+recording_process = None
+
+def notify(msg):
+    subprocess.run(['notify-send', 'Voice RT', msg], check=False)
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+def record_and_transcribe():
+    """Graba chunks de 5 segundos y los transcribe"""
+    global running
+    chunk_num = 0
+    
+    notify("🔴 Iniciando grabación en tiempo real...")
+    
+    while running:
+        chunk_file = CACHE_DIR / f'chunk_{chunk_num}.wav'
+        
+        # Grabar 5 segundos con ffmpeg
+        print(f"Grabando chunk {chunk_num}...")
+        cmd = [
+            'ffmpeg',
+            '-f', 'pulse',
+            '-i', 'default',
+            '-ar', '16000',
+            '-ac', '1',
+            '-t', '5',  # 5 segundos
+            '-y',
+            '-loglevel', 'error',
+            str(chunk_file)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0 and chunk_file.exists():
+            size = chunk_file.stat().st_size
+            print(f"Chunk grabado: {size} bytes")
+            
+            # Transcribir
+            print("Transcribiendo...")
+            cmd_whisper = [
+                WHISPER, '-m', MODEL,
+                '-l', 'es',
+                '-f', str(chunk_file),
+                '-otxt',
+                '--no-timestamps'
+            ]
+            
+            result = subprocess.run(cmd_whisper, capture_output=True, text=True, timeout=10)
+            
+            # Buscar archivo de texto
+            txt_file = Path(str(chunk_file) + '.txt')
+            if txt_file.exists():
+                with open(txt_file) as f:
+                    text = f.read().strip()
+                
+                if text:
+                    print(f"📝 TEXTO: {text}")
+                    notify(f"📝 {text[:50]}...")
+                    
+                    # Copiar al portapapeles
+                    try:
+                        subprocess.run(['wl-copy'], input=text, text=True, check=True)
+                    except:
+                        subprocess.run(['xsel', '-ib'], input=text, text=True)
+                
+                txt_file.unlink()
+            else:
+                print("No se generó archivo de texto")
+            
+            # Limpiar chunk
+            chunk_file.unlink()
+            chunk_num += 1
+        else:
+            print(f"Error grabando: {result.stderr}")
+            time.sleep(1)
+
+def cleanup(sig=None, frame=None):
+    global running
+    running = False
+    notify("⏹ Deteniendo...")
+    
+    # Limpiar archivos
+    for f in CACHE_DIR.glob('*.wav*'):
+        f.unlink()
+    for f in CACHE_DIR.glob('*.txt'):
+        f.unlink()
+    
+    sys.exit(0)
+
+def main():
+    # Verificar requisitos
+    if not os.path.exists(MODEL):
+        notify("❌ Modelo no encontrado")
+        sys.exit(1)
+    
+    if not os.path.exists(WHISPER):
+        notify("❌ Whisper no encontrado")
+        sys.exit(1)
+    
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+    
+    print("=" * 50)
+    print("TRANSCRIPCIÓN EN TIEMPO REAL")
+    print("Modelo: tiny (rápido)")
+    print("Chunks: 5 segundos")
+    print("Presiona Ctrl+C para detener")
+    print("=" * 50)
+    
+    try:
+        record_and_transcribe()
+    except KeyboardInterrupt:
+        cleanup()
+    except Exception as e:
+        print(f"Error: {e}")
+        cleanup()
+
+if __name__ == "__main__":
+    main()

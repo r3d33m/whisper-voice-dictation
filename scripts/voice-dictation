@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""
+Voice Dictation con DEBUG - Para encontrar el problema
+"""
+
+import subprocess
+import os
+import sys
+import time
+import signal
+from pathlib import Path
+import json
+
+CACHE_DIR = Path.home() / '.cache' / 'voice-debug'
+STATE_FILE = CACHE_DIR / 'state.json'
+CONFIG_FILE = CACHE_DIR / 'config.json'
+
+# Configuración por defecto
+DEFAULT_CONFIG = {
+    'model': 'tiny',  # tiny, small, medium, large
+    'language': 'es'
+}
+
+# Rutas de modelos disponibles
+MODELS = {
+    'tiny': "/home/miguel/src/whisper.cpp/models/ggml-tiny.bin",
+    'small': "/home/miguel/src/whisper.cpp/models/ggml-small.bin",
+    'medium': "/home/miguel/src/whisper.cpp/models/ggml-medium.bin",
+    'large': "/home/miguel/src/whisper.cpp/models/ggml-large.bin"
+}
+
+WHISPER_CLI = "/home/miguel/src/whisper.cpp/build/bin/whisper-cli"
+
+def load_config():
+    """Carga configuración o crea una por defecto"""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return DEFAULT_CONFIG
+
+def save_config(config):
+    """Guarda configuración"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
+def log(msg):
+    """Debug log"""
+    print(f"[DEBUG] {msg}")
+    with open(CACHE_DIR / 'debug.log', 'a') as f:
+        f.write(f"{time.ctime()}: {msg}\n")
+
+def notify(message):
+    """Notificación con debug"""
+    log(f"Notificación: {message}")
+    subprocess.run(['notify-send', 'Voice Dictation', message], check=False)
+
+def is_recording():
+    """Ve si hay grabación activa"""
+    log(f"Verificando si hay grabación en {STATE_FILE}")
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE) as f:
+                data = json.load(f)
+                pid = data.get('pid')
+                log(f"PID encontrado en estado: {pid}")
+                if pid:
+                    try:
+                        os.kill(pid, 0)
+                        log(f"Proceso {pid} está activo")
+                        return pid
+                    except OSError:
+                        log(f"Proceso {pid} ya no existe")
+        except Exception as e:
+            log(f"Error leyendo estado: {e}")
+    else:
+        log("Archivo de estado no existe")
+    return None
+
+def start_recording():
+    """Inicia grabación con debug"""
+    log("=== INICIANDO GRABACIÓN ===")
+    
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    log(f"Directorio cache creado: {CACHE_DIR}")
+    
+    audio_file = CACHE_DIR / f'recording_{int(time.time())}.wav'
+    log(f"Archivo de audio: {audio_file}")
+    
+    # Guardar estado con debug
+    state_data = {
+        'pid': os.getpid(),
+        'audio_file': str(audio_file),
+        'started': time.time()
+    }
+    
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state_data, f, indent=2)
+    log(f"Estado guardado: {state_data}")
+    
+    notify("🔴 Grabando...")
+    
+    # Limpiar al salir - dar tiempo para que el archivo se escriba correctamente
+    def cleanup(sig=None, frame=None):
+        log("=== LIMPIEZA ===")
+        # Esperar un poco más para que ffmpeg termine de escribir
+        time.sleep(1)
+        if STATE_FILE.exists():
+            log("Eliminando archivo de estado")
+            STATE_FILE.unlink()
+        # NO eliminar audio_file aquí - lo hace stop_recording después de transcribir
+        log("Terminando proceso de grabación")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+    
+    # Activar micrófono
+    log("Activando micrófono")
+    result = subprocess.run(['pactl', 'set-source-mute', '@DEFAULT_SOURCE@', '0'], 
+                          capture_output=True, text=True)
+    log(f"Resultado activar micro: {result.returncode}")
+    
+    # GRABACIÓN con ffmpeg optimizado
+    cmd = [
+        'ffmpeg',
+        '-f', 'pulse',
+        '-i', 'default',
+        '-ar', '16000',
+        '-ac', '1',
+        '-acodec', 'pcm_s16le',  # Codec directo sin conversión
+        '-fflags', 'nobuffer',    # Sin buffer para inicio rápido
+        '-flags', 'low_delay',    # Baja latencia
+        '-y',
+        str(audio_file)
+    ]
+    
+    log(f"Comando ffmpeg: {' '.join(cmd)}")
+    
+    try:
+        log("Ejecutando ffmpeg...")
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        log(f"ffmpeg terminó con código: {result.returncode}")
+    except subprocess.CalledProcessError as e:
+        log(f"Error en ffmpeg: {e}")
+        log(f"stderr: {e.stderr}")
+        cleanup()
+    except Exception as e:
+        log(f"Error inesperado: {e}")
+        cleanup()
+
+def stop_recording():
+    """Para grabación con debug completo"""
+    log("=== PARANDO GRABACIÓN ===")
+    
+    if not STATE_FILE.exists():
+        log("ERROR: Archivo de estado no existe")
+        notify("❌ No hay grabación activa")
+        return
+    
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        log(f"Estado leído: {data}")
+        
+        pid = data.get('pid')
+        audio_file = Path(data.get('audio_file'))
+        log(f"PID: {pid}, Archivo: {audio_file}")
+        
+        # Matar proceso
+        if pid:
+            log(f"Matando proceso {pid}")
+            try:
+                os.kill(pid, signal.SIGTERM)
+                log("Señal SIGTERM enviada")
+                time.sleep(3)  # Dar más tiempo a ffmpeg para cerrar correctamente
+            except Exception as e:
+                log(f"Error matando proceso: {e}")
+        
+        # notify("🔄 Procesando audio...")  # Comentado para reducir notificaciones
+        
+        # Verificar archivo
+        if audio_file.exists():
+            size = audio_file.stat().st_size
+            log(f"Archivo existe, tamaño: {size} bytes")
+            
+            if size > 1000:  # Al menos 1KB
+                log("Archivo tiene tamaño suficiente, transcribiendo...")
+                # notify("🔄 Transcribiendo...")  # Comentado - confunde al usuario
+                
+                # TRANSCRIBIR con modelo configurado
+                config = load_config()
+                model_path = MODELS.get(config['model'], MODELS['tiny'])
+                
+                cmd = [WHISPER_CLI, '-m', model_path, '-l', config['language'], 
+                      '-f', str(audio_file), '-otxt', '--no-timestamps']
+                
+                log(f"Comando whisper: {' '.join(cmd)}")
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                log(f"Whisper terminó con código: {result.returncode}")
+                log(f"Whisper stdout: {result.stdout[:200]}")
+                log(f"Whisper stderr: {result.stderr[:200]}")
+                
+                if result.returncode == 0:
+                    # Buscar archivo de texto
+                    txt_file = audio_file.parent / (audio_file.name + '.txt')
+                    log(f"Buscando archivo de texto: {txt_file}")
+                    
+                    if txt_file.exists():
+                        with open(txt_file) as f:
+                            text = f.read().strip()
+                        log(f"Texto transcrito: '{text}' (longitud: {len(text)})")
+                        
+                        if text:
+                            # COPIAR AL PORTAPAPELES
+                            log("Copiando al portapapeles...")
+                            try:
+                                subprocess.run(['wl-copy'], input=text, text=True, check=True)
+                                log("wl-copy exitoso")
+                            except:
+                                try:
+                                    subprocess.run(['xsel', '-ib'], input=text, text=True, check=True)
+                                    log("xsel exitoso")
+                                except Exception as e:
+                                    log(f"Error portapapeles: {e}")
+                            
+                            # Auto-pegar con la herramienta correcta para Wayland/X11
+                            # (Comentado por ahora - descomentar si quieres auto-pegado)
+                            # try:
+                            #     session_type = os.environ.get('XDG_SESSION_TYPE', 'x11')
+                            #     if session_type == 'wayland':
+                            #         subprocess.run(['wtype', text], check=True)
+                            #     else:
+                            #         subprocess.run(['xdotool', 'type', text], check=True)
+                            # except:
+                            #     pass
+                            
+                            # Quitamos notificación porque el popup es suficiente
+                            
+                            # POPUP con texto completo
+                            try:
+                                # Zenity info dialog con el texto completo
+                                # Calculamos duración en segundos
+                                duration = len(text.split()) // 3  # Aprox 3 palabras por segundo de lectura
+                                duration = max(5, min(duration, 30))  # Entre 5 y 30 segundos
+                                
+                                subprocess.run([
+                                    'zenity', '--info',
+                                    '--title=🎤 Dictado por voz - Texto en portapapeles',
+                                    '--text=' + text,
+                                    '--width=600',
+                                    '--timeout=' + str(duration)
+                                ], check=False)
+                                log("Popup zenity mostrado")
+                            except Exception as e:
+                                log(f"Error mostrando popup: {e}")
+                            
+                            print(f"TEXTO FINAL: {text}")
+                        else:
+                            log("Texto vacío")
+                            notify("⚠️ No se detectó voz")
+                        
+                        txt_file.unlink()
+                        log("Archivo txt eliminado")
+                    else:
+                        log("ERROR: Archivo txt no encontrado")
+                        notify("❌ Error en transcripción")
+                else:
+                    log("ERROR: Whisper falló")
+                    notify("❌ Error en whisper")
+                
+                audio_file.unlink()
+                log("Archivo de audio eliminado")
+            else:
+                log(f"ERROR: Archivo muy pequeño ({size} bytes)")
+                notify("❌ Grabación muy corta")
+        else:
+            log("ERROR: Archivo de audio no existe")
+            notify("❌ Error: no se creó grabación")
+        
+        if STATE_FILE.exists():
+            STATE_FILE.unlink()
+            log("Archivo de estado eliminado")
+        else:
+            log("Archivo de estado ya eliminado")
+        log("=== FIN STOP ===")
+        
+    except Exception as e:
+        log(f"ERROR GENERAL: {e}")
+        # Simplificar mensaje de error para notificación
+        if "timed out" in str(e):
+            notify("❌ Error: Transcripción tardó demasiado")
+        else:
+            notify("❌ Error en transcripción")
+
+def main():
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Limpiar log anterior
+    log_file = CACHE_DIR / 'debug.log'
+    if log_file.exists():
+        log_file.unlink()
+    
+    log("=== INICIO SCRIPT DEBUG ===")
+    
+    # Verificar si hay comando especial
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "config":
+            # Configurar modelo
+            if len(sys.argv) > 2:
+                new_model = sys.argv[2]
+                if new_model in MODELS:
+                    config = load_config()
+                    config['model'] = new_model
+                    save_config(config)
+                    notify(f"✅ Modelo cambiado a: {new_model}")
+                    print(f"Modelo cambiado a: {new_model}")
+                else:
+                    print(f"Modelos disponibles: {', '.join(MODELS.keys())}")
+                    notify(f"❌ Modelo no válido. Usa: {', '.join(MODELS.keys())}")
+            else:
+                config = load_config()
+                print(f"Modelo actual: {config['model']}")
+                print(f"Modelos disponibles: {', '.join(MODELS.keys())}")
+            sys.exit(0)
+    
+    # Si se llama sin argumentos (desde GNOME), hacer toggle
+    # Si se llama con argumentos, usar el argumento
+    if len(sys.argv) > 1:
+        action = sys.argv[1]
+        log(f"Acción desde argumento: {action}")
+        
+        if action == "start":
+            if is_recording():
+                log("Ya hay grabación activa")
+                notify("⚠️ Ya hay una grabación activa")
+            else:
+                start_recording()
+        elif action == "stop":
+            stop_recording()
+    else:
+        # Llamado sin argumentos - TOGGLE automático
+        log("Llamado sin argumentos - modo toggle")
+        if is_recording():
+            log("Ya grabando - parando...")
+            stop_recording()
+        else:
+            log("No grabando - iniciando...")
+            start_recording()
+
+if __name__ == "__main__":
+    main()

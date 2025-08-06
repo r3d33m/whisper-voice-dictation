@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""
+Transcripción en tiempo real mejorada
+- Acumula texto en vez de reemplazarlo
+- Chunks configurables
+- Opción de pegar automáticamente
+"""
+
+import subprocess
+import os
+import sys
+import time
+import signal
+from pathlib import Path
+import argparse
+
+CACHE_DIR = Path.home() / '.cache' / 'voice-realtime'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Modelos disponibles
+MODELS = {
+    'tiny': "/home/miguel/src/whisper.cpp/models/ggml-tiny.bin",
+    'small': "/home/miguel/src/whisper.cpp/models/ggml-small.bin",
+    'medium': "/home/miguel/src/whisper.cpp/models/ggml-medium.bin",
+    'large': "/home/miguel/src/whisper.cpp/models/ggml-large.bin"
+}
+
+WHISPER = "/home/miguel/src/whisper.cpp/build/bin/whisper-cli"
+
+running = True
+accumulated_text = []
+
+def notify(msg):
+    subprocess.run(['notify-send', 'Voice RT', msg], check=False)
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+def record_and_transcribe(chunk_duration=5, auto_paste=False, model='tiny'):
+    """Graba chunks y los transcribe"""
+    global running, accumulated_text
+    chunk_num = 0
+    
+    model_path = MODELS.get(model, MODELS['tiny'])
+    
+    notify(f"🔴 Grabando (chunks de {chunk_duration}s, modelo: {model})...")
+    print(f"{'='*50}")
+    print(f"Modelo: {model}")
+    print(f"Modo: {'Auto-pegar' if auto_paste else 'Solo copiar'}")
+    print(f"{'='*50}\n")
+    
+    while running:
+        chunk_file = CACHE_DIR / f'chunk_{chunk_num}.wav'
+        
+        # Grabar chunk con ffmpeg
+        cmd = [
+            'ffmpeg',
+            '-f', 'pulse',
+            '-i', 'default',
+            '-ar', '16000',
+            '-ac', '1',
+            '-t', str(chunk_duration),
+            '-y',
+            '-loglevel', 'error',
+            str(chunk_file)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0 and chunk_file.exists():
+            # Transcribir
+            cmd_whisper = [
+                WHISPER, '-m', model_path,
+                '-l', 'es',
+                '-f', str(chunk_file),
+                '-otxt',
+                '--no-timestamps'
+            ]
+            
+            result = subprocess.run(cmd_whisper, capture_output=True, text=True, timeout=10)
+            
+            # Buscar archivo de texto
+            txt_file = Path(str(chunk_file) + '.txt')
+            if txt_file.exists():
+                with open(txt_file) as f:
+                    text = f.read().strip()
+                
+                if text:
+                    # Acumular texto
+                    accumulated_text.append(text)
+                    full_text = " ".join(accumulated_text)
+                    
+                    # Mostrar chunk actual
+                    print(f"📝 [{chunk_num:02d}]: {text}")
+                    
+                    # Copiar texto acumulado al portapapeles
+                    try:
+                        subprocess.run(['wl-copy'], input=full_text, text=True, check=True)
+                    except:
+                        subprocess.run(['xsel', '-ib'], input=full_text, text=True)
+                    
+                    # Auto-pegar si está activado
+                    if auto_paste and text:
+                        try:
+                            # Detectar si estamos en Wayland o X11
+                            session_type = os.environ.get('XDG_SESSION_TYPE', 'x11')
+                            
+                            if session_type == 'wayland':
+                                # Para Wayland: usar Ctrl+V simulado si wtype falla
+                                try:
+                                    subprocess.run(['wtype', text + ' '], check=True)
+                                except:
+                                    # Alternativa: simular Ctrl+V
+                                    # Primero asegurarnos de que el texto está en el portapapeles
+                                    # y luego simular el pegado
+                                    print("wtype no funciona, texto en portapapeles")
+                            else:
+                                # Usar xdotool para X11
+                                subprocess.run(['xdotool', 'type', text + ' '], check=True)
+                        except FileNotFoundError:
+                            print("⚠️ Auto-pegado no disponible en Wayland")
+                        except Exception as e:
+                            print(f"Error auto-pegando: {e}")
+                
+                txt_file.unlink()
+            
+            # Limpiar chunk
+            chunk_file.unlink()
+            chunk_num += 1
+        else:
+            if result.stderr:
+                print(f"Error: {result.stderr}")
+            time.sleep(1)
+
+def show_summary():
+    """Muestra resumen final"""
+    global accumulated_text
+    
+    if accumulated_text:
+        full_text = " ".join(accumulated_text)
+        words = len(full_text.split())
+        chars = len(full_text)
+        
+        print(f"\n{'='*50}")
+        print(f"RESUMEN FINAL:")
+        print(f"- Chunks transcritos: {len(accumulated_text)}")
+        print(f"- Palabras totales: {words}")
+        print(f"- Caracteres: {chars}")
+        print(f"{'='*50}")
+        print(f"\nTEXTO COMPLETO:")
+        print(full_text)
+        print(f"{'='*50}")
+        
+        # Mostrar popup con texto completo
+        try:
+            subprocess.run([
+                'zenity', '--info',
+                '--title=Transcripción Completa',
+                '--text=' + full_text,
+                '--width=600'
+            ], check=False, timeout=30)
+        except:
+            pass
+        
+        notify(f"✅ Finalizado: {words} palabras")
+    else:
+        notify("⚠️ No se transcribió nada")
+
+def cleanup(sig=None, frame=None):
+    global running
+    running = False
+    
+    show_summary()
+    
+    # Limpiar archivos
+    for f in CACHE_DIR.glob('*.wav*'):
+        f.unlink()
+    for f in CACHE_DIR.glob('*.txt'):
+        f.unlink()
+    
+    sys.exit(0)
+
+def main():
+    parser = argparse.ArgumentParser(description='Transcripción de voz en tiempo real')
+    parser.add_argument('-d', '--duration', type=int, default=5, 
+                        help='Duración de chunks en segundos (default: 5)')
+    parser.add_argument('-m', '--model', type=str, default='tiny',
+                        choices=['tiny', 'small', 'medium', 'large'],
+                        help='Modelo de whisper a usar (default: tiny)')
+    parser.add_argument('-p', '--paste', action='store_true',
+                        help='Auto-pegar texto mientras se transcribe')
+    args = parser.parse_args()
+    
+    # Verificar modelo seleccionado
+    model_path = MODELS.get(args.model)
+    if not model_path or not os.path.exists(model_path):
+        notify(f"❌ Modelo {args.model} no encontrado")
+        print(f"Modelos disponibles: {', '.join(MODELS.keys())}")
+        sys.exit(1)
+    
+    if not os.path.exists(WHISPER):
+        notify("❌ Whisper no encontrado")
+        sys.exit(1)
+    
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+    
+    print("=" * 50)
+    print("TRANSCRIPCIÓN EN TIEMPO REAL")
+    print(f"Modelo: {args.model}")
+    print(f"Chunks: {args.duration} segundos")
+    print(f"Auto-pegar: {'Sí' if args.paste else 'No'}")
+    print("Presiona Ctrl+C para detener")
+    print("=" * 50)
+    
+    try:
+        record_and_transcribe(args.duration, args.paste, args.model)
+    except KeyboardInterrupt:
+        cleanup()
+    except Exception as e:
+        print(f"Error: {e}")
+        cleanup()
+
+if __name__ == "__main__":
+    main()

@@ -28,22 +28,77 @@ bash ./models/download-ggml-model.sh tiny
 bash ./models/download-ggml-model.sh small  # optional, for better accuracy
 ```
 
-### Installation
+### Quick Installation
 
 ```bash
 # Clone this repository
-git clone https://github.com/yourusername/whisper-voice-dictation.git
+git clone https://github.com/r3d33m/whisper-voice-dictation.git
 cd whisper-voice-dictation
 
+# Run the automatic installer
+./install.sh
+```
+
+The installer will:
+- ✅ Copy scripts to ~/bin and make them executable
+- ✅ Add ~/bin to your PATH (bash/zsh/fish)
+- ✅ Install GNOME extension
+- ✅ Set up keyboard shortcuts (Super+D/Super+C)
+- ✅ Install bash completion
+- ✅ Check dependencies and suggest installation
+- ✅ Optionally create a system service
+
+### Manual Installation
+
+```bash
 # Copy scripts to your bin directory
+mkdir -p ~/bin
 cp scripts/* ~/bin/
 chmod +x ~/bin/voice-*
 
+# Add ~/bin to PATH (if not already)
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc  # For bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc   # For zsh
+source ~/.bashrc  # or ~/.zshrc
+
 # Install GNOME extension
+mkdir -p ~/.local/share/gnome-shell/extensions/
 cp -r gnome-extension ~/.local/share/gnome-shell/extensions/voice-dictation@miguel
 
 # Set up keyboard shortcuts
 ./setup-keybindings.sh
+```
+
+### System Service (Optional)
+
+Create a systemd user service to ensure the voice dictation is always available:
+
+```bash
+# Create service file
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/voice-dictation.service << 'EOF'
+[Unit]
+Description=Voice Dictation Service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/%i/bin/voice-dictation daemon
+Restart=always
+RestartSec=5
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start service
+systemctl --user daemon-reload
+systemctl --user enable voice-dictation.service
+systemctl --user start voice-dictation.service
+
+# Check status
+systemctl --user status voice-dictation.service
 ```
 
 ## 📖 Usage
@@ -95,6 +150,95 @@ voice-dictation config tiny
 - **small**: Balanced (5-8 seconds), recommended for most users
 - **medium**: High accuracy (15-20 seconds)
 - **large**: Best accuracy (30+ seconds)
+
+### Shell Integration
+
+The installation automatically adds the scripts to your PATH. For different shells:
+
+#### Bash
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+#### Zsh (with Oh My Zsh)
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+#### Fish
+```bash
+set -U fish_user_paths $HOME/bin $fish_user_paths
+```
+
+#### Verify Installation
+```bash
+which voice-dictation  # Should show /home/username/bin/voice-dictation
+voice-dictation config # Should show current model
+```
+
+### Command Completion (Optional)
+
+Add bash completion for the voice commands:
+
+```bash
+# Create completion script
+cat > ~/.local/share/bash-completion/completions/voice-dictation << 'EOF'
+_voice_dictation() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    
+    case ${prev} in
+        config)
+            opts="tiny small medium large"
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+        voice-dictation)
+            opts="config start stop"
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+    esac
+}
+complete -F _voice_dictation voice-dictation
+EOF
+
+# For voice-realtime
+cat > ~/.local/share/bash-completion/completions/voice-realtime << 'EOF'
+_voice_realtime() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    
+    case ${prev} in
+        -m|--model)
+            opts="tiny small medium large"
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+        -d|--duration)
+            opts="2 3 5 10"
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+        voice-realtime)
+            opts="-m --model -d --duration -p --paste -h --help"
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+    esac
+}
+complete -F _voice_realtime voice-realtime
+EOF
+
+# Reload completions
+source ~/.bashrc
+```
 
 ## 📁 File Structure
 
